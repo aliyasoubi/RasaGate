@@ -1,0 +1,17 @@
+services:
+  gate:
+    build: .
+    ports: ["8000:8000"]
+    env_file: .env
+    volumes:
+      - ./shared:/app/shared      # nlu.yml / domain.yml
+      - ./models:/app/models      # ephemeral .tar.gz
+    depends_on: [rasa]
+
+  rasa:
+    image: rasa/rasa:latest
+    command: run --enable-api -m /app/models
+    ports: ["5005:5005"]
+    volumes:
+      - ./shared:/app/shared
+      - ./models:/app/models
