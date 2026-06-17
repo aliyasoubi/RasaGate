@@ -205,3 +205,30 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# =========================
+# Rasa Gate Custom Additions
+# =========================
+
+# SQLite Databases (Crucial for your pilot phase)
+*.db
+*.sqlite
+*.sqlite3
+
+# Rasa specific files (Generated models and cache)
+.rasa/
+models/*.tar.gz
+results/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDEs (Uncommenting these is highly recommended so local settings don't conflict with other devs)
+.idea/
+.vscode/
