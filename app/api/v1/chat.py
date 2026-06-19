@@ -1,5 +1,5 @@
-# app/api/v1/chat.py
-from fastapi import APIRouter
+"""Chat proxy endpoint: forwards a user message to Rasa."""
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from app.schemas.base import SuccessResponse
@@ -12,8 +12,6 @@ class MessageRequest(BaseModel):
     sender_id: str
     message: str
 
-
-from fastapi import APIRouter, Request
 
 @router.post("/", response_model=SuccessResponse)
 async def chat(payload: MessageRequest, request: Request):

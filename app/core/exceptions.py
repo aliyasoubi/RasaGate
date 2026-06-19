@@ -42,15 +42,11 @@ class IntentConflictError(RasaGateException):
         )
 
 
-class ResourceNotFoundError(RasaGateException):
-    # resource_id accepts int (example/response IDs) or str (task_id)
-    def __init__(self, resource: str, resource_id: int | str):
-        super().__init__(
-            status.HTTP_404_NOT_FOUND,
-            f"{resource.upper().replace(' ', '_')}_NOT_FOUND",
-            f"{resource.capitalize()} '{resource_id}' not found.",
-            {"id": resource_id},
-        )
+class ResourceNotFoundError(Exception):
+    def __init__(self, resource: str, identifier: str | int) -> None:
+        self.resource = resource
+        self.identifier = identifier
+        super().__init__(f"{resource} '{identifier}' not found")
 
 
 class TrainingInProgressError(RasaGateException):

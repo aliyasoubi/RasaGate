@@ -1,4 +1,6 @@
-# app/services/yaml_builder.py
+"""
+NLU data compilation: converts database intents/examples/responses into Rasa YAML format.
+"""
 from io import StringIO
 
 import yaml
@@ -11,7 +13,7 @@ RASA_VERSION = "3.1"
 
 
 def _literal_str_representer(dumper: yaml.Dumper, data: str):
-    """Render multi-line strings as block scalars for readability."""
+    """Render multi-line strings as block scalars."""
     style = "|" if "\n" in data else None
     return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
 
@@ -82,7 +84,6 @@ def build_domain_yaml(db: Session) -> str:
     })
 
 
-
 def build_rules_yaml(db: Session) -> str:
     intents = _load_intents(db)
 
@@ -98,3 +99,14 @@ def build_rules_yaml(db: Session) -> str:
     ]
 
     return _dump({"version": RASA_VERSION, "rules": rules})
+
+
+def build_combined_training_data(db: Session) -> str:
+    """
+    Rasa training endpoint accepts a single YAML payload.
+    Combine nlu + domain + rules with YAML document separators.
+    """
+    nlu = build_nlu_yaml(db)
+    domain = build_domain_yaml(db)
+    rules = build_rules_yaml(db)
+    return f"{nlu}\n---\n{domain}\n---\n{rules}"
