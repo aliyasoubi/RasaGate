@@ -1,341 +1,175 @@
-# Rasa Gate v1.0: Architecture Overview
+# Rasa Gate
 
-## What Is Rasa Gate?
+**A lightweight, self-hosted data-management API for Rasa Open Source.**
 
-Rasa Gate is a robust proxy and management API built with FastAPI. It sits between your client applications and the Rasa
-server.
+Rasa Gate sits between your client apps and a Rasa server. Instead of
+hand-editing YAML files, you manage intents, training examples, and bot
+responses through a clean REST API backed by a database — then trigger
+training with one call and the new model is hot-swapped into Rasa
+automatically.
 
-Instead of directly editing Rasa's configuration files, Rasa Gate utilizes a relational database as the single source of
-truth to prevent file-locking and concurrency issues. It performs three main tasks:
+## Why
 
-1. **Proxies chat messages** securely to Rasa and standardizes the responses.
-2. **Manages NLU and Domain data** via standard RESTful CRUD endpoints backed by a database.
-3. **Orchestrates asynchronous model training** and hot-reloads the updated model into Rasa's memory.
+- Hand-editing `nlu.yml` / `domain.yml` doesn't scale and breaks under
+  concurrent edits. Rasa Gate makes a relational database the single source
+  of truth.
+- Rasa X was deprecated, leaving no lightweight open-source way for
+  non-developers or external apps to manage bot content. Rasa Gate fills
+  that gap with plain HTTP.
 
----
+## What it does
 
-## Recommended Best Practice Tech Stack
+1. **Proxies chat** — `POST /api/v1/chat` forwards messages to Rasa and
+   standardizes the response envelope.
+2. **Manages NLU data** — RESTful CRUD for intents, examples, and responses,
+   with validation and cascade deletes.
+3. **Orchestrates training** — compiles the database into a single Rasa
+   training payload, trains asynchronously in the background, persists the
+   model, hot-reloads it into Rasa, and optionally notifies a webhook.
 
-To implement this architecture effectively, the following stack is recommended:
+## Quickstart (Docker)
 
-* **Web Framework:** **FastAPI** (for high performance, async support, and auto-generated Swagger UI).
-* **Data Validation:** **Pydantic V2** (for strict input schemas and regex validation).
-* **Database ORM:** **SQLAlchemy 2.0** (for interacting with the database using Python objects).
-* **Database Engine:** **PostgreSQL** (Production) or **SQLite** (Development/Testing).
-* **Database Migrations:** **Alembic** (to track changes to the database schema over time).
-* **Asynchronous Tasks:** FastAPI's built-in **`BackgroundTasks`** (sufficient for standard training, upgradable to *
-  *Celery** + Redis if training queues become highly complex).
-
----
-# Project Folder Architecture
-
-For a scalable and maintainable FastAPI project, we use a domain-driven, layered architecture.
-
-```text
-rasa-gate/
-├── app/
-│   ├── api/                 # API Routers (Endpoints)
-│   ├── core/                # App-wide settings and configs
-│   ├── db/                  # Database setup and sessions
-│   ├── models/              # SQLAlchemy ORM Models (Database Tables)
-│   ├── schemas/             # Pydantic Models (Request/Response Validation)
-│   ├── services/            # Business Logic & External API Calls
-│   └── main.py              # FastAPI application instance & entry point
-├── alembic/                 # Database migration scripts
-├── alembic.ini              # Alembic configuration
-├── requirements.txt         # Python dependencies
-├── .env                     # Environment variables
-└── README.md
-```
----
-## Component Diagram & Architecture
-
-```text
-  +---------+         +-----------------+         +--------------+
-  |         |  HTTP   |                 |  HTTP   |              |
-  | Client  | ------> |   Rasa Gate     | ------> | Rasa Server  |
-  |         | <------ |   (FastAPI)     | <------ |              |
-  +---------+         +--------+--------+         +--------------+
-                               |                          ^
-                               | DB Read/Write &          |
-                               | YAML Generation          |
-                               v                          |
-                      +------------------+                |
-                      |   Rasa Gate DB   |                |
-                      | (SQLite/Postgres)|                |
-                      +------------------+                |
-                      |  Shared Volume   |----------------+
-                      |  - nlu.yml       |
-                      |  - domain.yml    |
-                      +------------------+
+```bash
+git clone <your-repo-url> && cd rasa-gate
+docker compose up --build
 ```
 
-### Components
+Gate: http://localhost:8000 (Swagger UI at `/docs`) · Rasa: http://localhost:5005
 
-- **Client:** Any HTTP client: a web frontend, mobile app, custom backend (PHP, Node.js, Go), curl, or Postman.
-- **Rasa Gate (FastAPI):** Single entry point handling authentication, validation, chat proxying, database NLU resource
-  management, and YAML generation/training orchestration.
-- **Database:** Replaces manual YAML editing, ensures safe concurrent data entry, and acts as the master record for NLU
-  data.
-- **Rasa Server:** Standard Rasa Open Source instance that handles NLU parsing, dialogue management, and reads YAML from
-  the shared Docker volume.
+Create an intent, train, and chat:
 
----
+```bash
+# 1. Create an intent with examples and responses in one call
+curl -X POST http://localhost:8000/api/v1/intents/ \
+  -H "Content-Type: application/json" \
+  -d '{"name":"greet","examples":["hi","hello","hey there"],"responses":["Hello! How can I help you?"]}'
 
-## Core API Request Flows & Design Rules
+# 2. Trigger training (returns 202 + task_id)
+curl -X POST http://localhost:8000/api/v1/models/train \
+  -H "Content-Type: application/json" -d '{}'
 
-### 1. Chat — `POST /api/v1/chat`
+# 3. Poll status until "success"
+curl http://localhost:8000/api/v1/models/train/status/<task_id>
 
-```text
-Client                Rasa Gate              Rasa Server
-  |                      |                       |
-  |--- POST /chat ------>|                       |
-  |                      |--- POST /webhook ---->|
-  |                      |<-- JSON response -----|
-  |<-- Standard JSON ----|                       |
-*Client sends `sender_id` and `message`. Rasa Gate forwards it, awaits the reply, formats it, and returns it securely.*
+# 4. Chat
+curl -X POST http://localhost:8000/api/v1/chat/ \
+  -H "Content-Type: application/json" \
+  -d '{"sender_id":"user1","message":"hi"}'
 ```
 
----
+## Local development (no Docker)
 
-### 2. Manage NLU Data (RESTful CRUD)
-
-Instead of touching YAML directly, clients interact with REST resources. The API enforces strict naming, allows for easy editing, and handles database cascading automatically.
-
-#### Endpoints
-
-- **Create/Read:**
-- `GET /api/v1/intents`
-- `POST /api/v1/intents` *(Can accept intent, examples, and responses in one payload)*
-- `POST /api/v1/intents/{intent_name}/examples`
-- `POST /api/v1/intents/{intent_name}/responses`
-- **Update/Edit:**
-- `PUT /api/v1/intents/{intent_name}` *(Rename the intent; automatically updates linked `utter_` responses)*
-- `PUT /api/v1/intents/{intent_name}/examples/{example_id}` *(Edit a specific training phrase)*
-- `PUT /api/v1/intents/{intent_name}/responses/{response_id}` *(Edit a specific bot response)*
-- **Delete (with Cascading):**
-- `DELETE /api/v1/intents/{intent_name}` *(Deletes the intent AND automatically cascades to delete all of its linked examples and domain responses)*
-- `DELETE /api/v1/intents/{intent_name}/examples/{example_id}` *(Deletes a specific training phrase only)*
-
-#### Data Validation & Design Rules
-
-1. **Strict Naming Rules:** Intent names must not contain spaces or special characters. Pydantic enforces a regex pattern: `^[a-z0-9_]+$`.
-2. **Domain Abstraction:** Clients do not need to know about Rasa's `utter_` prefix. When a client adds a "response" to an intent, Rasa Gate links them in the DB. During YAML generation, Rasa Gate automatically prepends `utter_{intent_name}` to construct the `domain.yml` file.
-
-*> Note: Altering data via the CRUD API only updates the database. The live model is **not** updated until training is triggered.*
-
-
----
-
-### 3. Train & Reload Model — `POST /api/v1/models/train`
-
-This is a non-blocking operation utilizing asynchronous background tasks.
-
-#### Model Versioning Strategy: "Latest Only"
-
-Rasa Gate treats YAML files and trained `.tar.gz` model files as **ephemeral build artifacts**. We do not store a history of trained models. Space complexity is kept at $O(1)$. If a rollback is needed, the user corrects the data via the CRUD API and retrains. The newest model always overwrites the old one and is immediately loaded into memory.
-
-```text
-Client                Rasa Gate              DB / Files          Rasa Server
-  |                      |                       |                   |
-  |--- POST /train ----->|                       |                   |
-  |<-- 202 Accepted -----|                       |                   |
-  | (with task_id)       |                       |                   |
-  |                      |--- Dump DB to YAML -->|                   |
-  |                      |                       |                   |
-  |                      |--------- POST /model/train -------------->|
-  |                      |<-------- New model.tar.gz ----------------|
-  |                      |                       |                   |
-  |                      |--------- PUT /model (Reload) ------------>|
-  |                      |<-------- 204 No Content ------------------|
-  |                      |                       |                   |
-  |                      |--- Update task status in DB               |
+```bash
+python -m venv venv && source venv/bin/activate
+pip install -r requirements-dev.txt
+cp .env.example .env          # adjust RASA_URL if needed
+uvicorn app.main:app --reload
+pytest                        # run the test suite
 ```
 
-**Steps:**
+## API reference
 
-1. Client requests training. Rasa Gate returns `202 Accepted` and a `task_id` immediately.
-2. Background task queries the database and generates clean `nlu.yml` and `domain.yml` files in the shared volume.
-3. Rasa Gate calls Rasa's `/model/train` endpoint.
-4. Upon successful training, Rasa Gate calls Rasa's `PUT /model` to load the newly created model into memory.
-5. Client polls `GET /api/v1/models/train/status/{task_id}` to know when the bot is ready.
+### Chat
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/v1/chat/` | Forward `{sender_id, message}` to Rasa |
 
-## Database Schema (SQLAlchemy Models)
+### Intents (CRUD)
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/intents/` | List all intents |
+| POST | `/api/v1/intents/` | Create intent (optionally with examples + responses) |
+| GET | `/api/v1/intents/{name}` | Get one intent |
+| PATCH | `/api/v1/intents/{name}` | Update intent description |
+| DELETE | `/api/v1/intents/{name}` | Delete intent (cascades to examples & responses) |
+| POST | `/api/v1/intents/{name}/examples` | Add a training example |
+| PUT | `/api/v1/intents/{name}/examples/{id}` | Edit an example |
+| DELETE | `/api/v1/intents/{name}/examples/{id}` | Delete an example |
+| POST | `/api/v1/intents/{name}/responses` | Add a response variation |
+| PUT | `/api/v1/intents/{name}/responses/{id}` | Edit a response |
+| DELETE | `/api/v1/intents/{name}/responses/{id}` | Delete a response |
 
-### Table: `intents`
+### Training
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/v1/models/train` | Start async training (202 + `task_id`); optional `{"webhook_url": "..."}` |
+| GET | `/api/v1/models/train/status/{task_id}` | Poll task status |
 
-| Column     | Type        | Constraints                             |
-|------------|-------------|-----------------------------------------|
-| id         | Integer     | Primary Key                             |
-| name       | String(100) | Unique, Not Null, Regex: `^[a-z0-9_]+$` |
-| created_at | DateTime    | Default: now()                          |
-| updated_at | DateTime    | OnUpdate: now()                         |
+## Design rules
 
-### Table: `examples`
+- **Intent naming:** `^[a-z0-9_]+$`, enforced by Pydantic. Invalid names → 400.
+- **Domain abstraction:** clients never see Rasa's `utter_` prefix. Response
+  variations you add to intent `greet` are grouped under `utter_greet` at
+  build time.
+- **Auto-generated rules:** for every intent *that has at least one response*,
+  a rule `intent → utter_intent` is generated. v1.0 has no manual
+  stories/rules editing.
+- **Single training payload:** the DB is compiled into ONE merged YAML
+  document (domain + nlu + rules) and posted to Rasa's `/model/train` — no
+  shared-file editing, no file locking.
+- **Latest-only models:** trained `.tar.gz` files are ephemeral build
+  artifacts. No model history; to "roll back," fix the data and retrain.
+- **One training at a time:** a second train request while one is
+  pending/processing returns 503. Tasks stranded by a server restart are
+  automatically marked failed at startup.
 
-| Column     | Type     | Constraints                               |
-|------------|----------|-------------------------------------------|
-| id         | Integer  | Primary Key                               |
-| intent_id  | Integer  | Foreign Key → intents.id (CASCADE DELETE) |
-| text       | Text     | Not Null                                  |
-| created_at | DateTime | Default: now()                            |
+## Configuration
 
-### Table: `responses`
+Copy `.env.example` to `.env`:
 
-| Column     | Type     | Constraints                               |
-|------------|----------|-------------------------------------------|
-| id         | Integer  | Primary Key                               |
-| intent_id  | Integer  | Foreign Key → intents.id (CASCADE DELETE) |
-| text       | Text     | Not Null                                  |
-| created_at | DateTime | Default: now()                            |
+| Variable | Default | Description |
+|---|---|---|
+| `DATABASE_URL` | `sqlite:///./rasa_gate.db` | SQLite for dev, PostgreSQL for prod |
+| `RASA_URL` | `http://localhost:5005` | Rasa server base URL |
+| `RASA_MODEL_PATH` | `./models` | Where trained models are written (shared with Rasa) |
+| `AUTH_TOKEN` | *(empty)* | If set, all `/api/*` routes require header `X-API-Key: <token>` |
+| `LOG_LEVEL` | `INFO` | Structured JSON logs via structlog |
 
-### Table: `training_tasks`
+## Error responses
 
-| Column        | Type        | Constraints                                          |
-|---------------|-------------|------------------------------------------------------|
-| task_id       | String(50)  | Primary Key                                          |
-| status        | Enum        | Values: `pending`, `processing`, `success`, `failed` |
-| started_at    | DateTime    | Default: now()                                       |
-| completed_at  | DateTime    | Nullable                                             |
-| error_message | Text        | Nullable                                             |
-| webhook_url   | String(500) | Nullable                                             |
-
-**Relationships:**
-
-- `Intent` → `Examples` (One-to-Many, Cascade Delete)
-- `Intent` → `Responses` (One-to-Many, Cascade Delete)
-
----
-
-## Response Management & Stories Auto-Generation
-
-**Design Rule:** Each intent has exactly **one** response action named `utter_{intent_name}`.
-
-- When a client creates an intent `greet`, Rasa Gate automatically creates a response action `utter_greet` in the
-  domain.
-- Clients can add **multiple text variations** to `utter_greet` (stored in the `responses` table).
-- During YAML generation, all variations are grouped under the same `utter_` key.
-
-**Example domain.yml output:**
-
-```yaml
-responses:
-  utter_greet:
-    - text: "Hello! How can I help you?"
-    - text: "Hi there!"
-```
-
-**Client API abstraction:** Clients never see `utter_` prefixes. They just POST to `/api/v1/intents/greet/responses`.
-
-
----
-
-### 3. **Stories & Rules Auto-Generation**
-
-You mention it briefly but don't explain the logic:
-
-## Stories & Rules (Auto-Generated)
-
-Rasa Gate **does not** support manual story/rule editing in v1.0. Instead:
-
-- For every intent, a simple rule is auto-generated during YAML dump:
-
-```yaml
-  rules:
-    - rule: Respond to greet
-  steps:
-    - intent: greet
-    - action: utter_greet
-```  
-
----
-
-### 4. **Error Handling & HTTP Status Codes**
-
-Add a reference table:
-
-## HTTP Status Codes & Error Handling
-
-| Status                    | Scenario                                      |
-|---------------------------|-----------------------------------------------|
-| 200 OK                    | Successful GET/PUT/DELETE                     |
-| 201 Created               | Successful POST (resource created)            |
-| 202 Accepted              | Training started (async task)                 |
-| 400 Bad Request           | Invalid input (e.g., intent name with spaces) |
-| 404 Not Found             | Intent/Example/Response not found             |
-| 409 Conflict              | Intent name already exists                    |
-| 500 Internal Server Error | Rasa server unreachable or DB failure         |
-| 503 Service Unavailable   | Training already in progress                  |
-
-**Error Response Example:**
+All errors share one envelope:
 
 ```json
 {
   "status": "error",
-  "error_code": "INTENT_NAME_INVALID",
-  "message": "Intent name must match pattern: ^[a-z0-9_]+$",
-  "details": {
-    "field": "name",
-    "provided_value": "greet user!"
-  }
+  "error_code": "INTENT_ALREADY_EXISTS",
+  "message": "Intent 'greet' already exists.",
+  "details": {"intent_name": "greet"}
 }
 ```
 
----
+| Status | When |
+|---|---|
+| 400 | Validation failure (e.g. intent name with spaces) |
+| 401 | Missing/invalid `X-API-Key` (when auth enabled) |
+| 404 | Intent / example / response / task not found |
+| 409 | Intent name already exists |
+| 500 | Rasa unreachable or internal failure |
+| 503 | Training already in progress |
 
-## Observability & Logging
+## Architecture
 
-Rasa Gate is designed to be highly observable for production environments without forcing heavy infrastructure
-dependencies.
-
-1. **Structured Logging:** All application logs are output to `stdout` in pure JSON format (using `structlog`). This
-   makes Rasa Gate natively compatible with log aggregators like ELK (Elasticsearch/Logstash/Kibana), Datadog, or
-   Grafana Loki.
-2. **Correlation IDs:** Every incoming HTTP request is assigned an `X-Request-ID`. This Correlation ID is attached to
-   all database operations, background tasks, and is passed downstream to the Rasa Server headers. This ensures complete
-   end-to-end traceability of every chat message and training task.
-
----
-
-### 5. **Environment Variables & Configuration**
-
-Add a `.env` example:
-
-## Environment Configuration
-
-**`.env` file:**
-
-```env
-APP_HOST=0.0.0.0
-APP_PORT=8000
-APP_DEBUG=True
-LOG_LEVEL=INFO
-
-DATABASE_URL=sqlite:///./rasa_gate.db
-
-RASA_URL=http://localhost:5005
-RASA_MODEL_PATH=./models
-AUTH_TOKEN=
-```
-## Installation
-
-1. **Clone the repository:**
-```bash
-   git clone <your-repo-url>
-   cd rasa-gate
+```text
+  +---------+         +-----------------+         +--------------+
+  | Client  | ------> |   Rasa Gate     | ------> | Rasa Server  |
+  |         | <------ |   (FastAPI)     | <------ |  (3.6.x)     |
+  +---------+         +--------+--------+         +------+-------+
+                               |                         |
+                        DB read/write            shared ./models
+                               v                  volume (tar.gz)
+                      +------------------+              |
+                      |   Rasa Gate DB   |              |
+                      | (SQLite/Postgres)|<-------------+
+                      +------------------+   hot-swap via PUT /model
 ```
 
-2. **Create and activate a virtual environment:**
-```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+Stack: FastAPI · Pydantic v2 · SQLAlchemy 2.0 · httpx · structlog.
+Observability: JSON logs to stdout, `X-Request-ID` correlation on every request.
 
-3. **Install dependencies:**
-```bash   
-  pip install -r requirements.txt
-```
-4. **Run the application:**
-```bash   
-  uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
+## Roadmap
+
+- Entity / slot annotation support
+- Manual stories & rules editing
+- Web admin UI (intent editor + train button + chat test widget)
+- Alembic migrations for production schema changes
+- Pagination on list endpoints

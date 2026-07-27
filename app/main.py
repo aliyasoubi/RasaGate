@@ -13,10 +13,38 @@ from app.db.session import Base, engine
 from app.services.rasa_client import RasaClient
 
 
+def _recover_stale_tasks() -> None:
+    """
+    If the server crashed/restarted mid-training, tasks stuck in
+    pending/processing would block all future training (503) forever.
+    On startup, mark them as failed so the queue is usable again.
+    """
+    from sqlalchemy import select
+
+    from app.db.session import SessionLocal
+    from app.models.nlu import TaskStatus, TrainingTask
+
+    db = SessionLocal()
+    try:
+        stale = db.scalars(
+            select(TrainingTask).where(
+                TrainingTask.status.in_([TaskStatus.pending, TaskStatus.processing])
+            )
+        ).all()
+        for task in stale:
+            task.status = TaskStatus.failed
+            task.error_message = "Server restarted while task was in progress."
+        if stale:
+            db.commit()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging(settings.log_level)
     Base.metadata.create_all(bind=engine)  # dev only; use Alembic in prod
+    _recover_stale_tasks()
     async with httpx.AsyncClient(timeout=30.0) as client:
         app.state.rasa = RasaClient(client)
         yield

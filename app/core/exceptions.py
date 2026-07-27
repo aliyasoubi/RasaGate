@@ -42,11 +42,16 @@ class IntentConflictError(RasaGateException):
         )
 
 
-class ResourceNotFoundError(Exception):
+class ResourceNotFoundError(RasaGateException):
     def __init__(self, resource: str, identifier: str | int) -> None:
         self.resource = resource
         self.identifier = identifier
-        super().__init__(f"{resource} '{identifier}' not found")
+        super().__init__(
+            status.HTTP_404_NOT_FOUND,
+            "RESOURCE_NOT_FOUND",
+            f"{resource} '{identifier}' not found.",
+            {"resource": resource, "identifier": str(identifier)},
+        )
 
 
 class TrainingInProgressError(RasaGateException):

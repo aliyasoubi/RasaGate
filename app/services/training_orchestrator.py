@@ -60,7 +60,7 @@ async def run_training_pipeline(task_id: str) -> None:
             # 4. Hot-swap the freshly trained model into Rasa.
             await rasa.replace_model(str(model_path.absolute()))
 
-        task.status = TaskStatus.completed
+        task.status = TaskStatus.success
         task.completed_at = _now()
         db.commit()
 

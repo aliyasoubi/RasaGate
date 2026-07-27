@@ -2,11 +2,13 @@
 """
 Optional API key authentication.
 
-If `api_key` is set in settings (via .env), every request to /api/*
+If `auth_token` is set in settings (via .env), every request to /api/*
 must include the header:  X-API-Key: <your_key>
 
-If `api_key` is None / empty, auth is disabled (useful for local dev).
+If `auth_token` is None / empty, auth is disabled (useful for local dev).
 """
+import secrets
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -19,7 +21,7 @@ _UNPROTECTED_PREFIXES = ("/health", "/docs", "/openapi.json", "/redoc")
 class ApiKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # Auth disabled — let everything through
-        if not settings.api_key:
+        if not settings.auth_token:
             return await call_next(request)
 
         # Public routes — no key required
@@ -27,7 +29,8 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         provided = request.headers.get("X-API-Key", "")
-        if provided != settings.api_key:
+        # Constant-time comparison to prevent timing attacks
+        if not secrets.compare_digest(provided, settings.auth_token):
             return JSONResponse(
                 status_code=401,
                 content={

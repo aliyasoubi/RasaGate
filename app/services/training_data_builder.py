@@ -103,10 +103,50 @@ def build_rules_yaml(db: Session) -> str:
 
 def build_combined_training_data(db: Session) -> str:
     """
-    Rasa training endpoint accepts a single YAML payload.
-    Combine nlu + domain + rules with YAML document separators.
+    Rasa's /model/train endpoint accepts a SINGLE YAML document that merges
+    domain + nlu + rules keys. Multi-document streams ('---' separators) are
+    not reliably parsed, so we merge all sections into one dict and dump once.
     """
-    nlu = build_nlu_yaml(db)
-    domain = build_domain_yaml(db)
-    rules = build_rules_yaml(db)
-    return f"{nlu}\n---\n{domain}\n---\n{rules}"
+    intents = _load_intents(db)
+
+    # --- NLU section ---
+    nlu_items = []
+    for intent in intents:
+        if not intent.examples:
+            continue
+        examples_block = "".join(f"- {ex.text}\n" for ex in intent.examples)
+        nlu_items.append({"intent": intent.name, "examples": examples_block})
+
+    # --- Domain sections ---
+    intent_names = [intent.name for intent in intents]
+    responses_block: dict = {}
+    for intent in intents:
+        if intent.responses:
+            responses_block[f"utter_{intent.name}"] = [
+                {"text": r.text} for r in intent.responses
+            ]
+
+    # --- Rules section (only for intents that have a response to utter) ---
+    rules = [
+        {
+            "rule": f"Respond to {intent.name}",
+            "steps": [
+                {"intent": intent.name},
+                {"action": f"utter_{intent.name}"},
+            ],
+        }
+        for intent in intents
+        if intent.responses
+    ]
+
+    return _dump({
+        "version": RASA_VERSION,
+        "intents": intent_names,
+        "responses": responses_block,
+        "session_config": {
+            "session_expiration_time": 60,
+            "carry_over_slots_to_new_session": True,
+        },
+        "nlu": nlu_items,
+        "rules": rules,
+    })
