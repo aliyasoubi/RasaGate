@@ -8,6 +8,9 @@ responses through a clean REST API backed by a database — then trigger
 training with one call and the new model is hot-swapped into Rasa
 automatically.
 
+Full design rationale, database schema, and request-flow diagrams live in
+**[ARCHITECTURE.md](doc/ARCHITECTURE.md)**.
+
 ## Why
 
 - Hand-editing `nlu.yml` / `domain.yml` doesn't scale and breaks under
@@ -17,16 +20,6 @@ automatically.
   non-developers or external apps to manage bot content. Rasa Gate fills
   that gap with plain HTTP.
 
-## What it does
-
-1. **Proxies chat** — `POST /api/v1/chat` forwards messages to Rasa and
-   standardizes the response envelope.
-2. **Manages NLU data** — RESTful CRUD for intents, examples, and responses,
-   with validation and cascade deletes.
-3. **Orchestrates training** — compiles the database into a single Rasa
-   training payload, trains asynchronously in the background, persists the
-   model, hot-reloads it into Rasa, and optionally notifies a webhook.
-
 ## Quickstart (Docker)
 
 ```bash
@@ -35,6 +28,12 @@ docker compose up --build
 ```
 
 Gate: http://localhost:8000 (Swagger UI at `/docs`) · Rasa: http://localhost:5005
+
+On startup, the Gate waits for Rasa to become reachable and preloads the
+most recently trained model (if `./models` has one) so a restart doesn't
+leave Rasa idle. This is best-effort — if Rasa isn't up yet, the Gate still
+boots and serves its own CRUD API; chat/training calls will just fail until
+Rasa is reachable.
 
 Create an intent, train, and chat:
 
@@ -67,6 +66,11 @@ uvicorn app.main:app --reload
 pytest                        # run the test suite
 ```
 
+> If you're not also running a local Rasa server, set `RASA_STARTUP_WAIT=false`
+> in `.env` — otherwise the Gate will spend up to `RASA_STARTUP_MAX_RETRIES *
+> RASA_STARTUP_RETRY_DELAY` seconds waiting for Rasa on every startup before
+> giving up and continuing anyway.
+
 ## API reference
 
 ### Chat
@@ -95,24 +99,6 @@ pytest                        # run the test suite
 | POST | `/api/v1/models/train` | Start async training (202 + `task_id`); optional `{"webhook_url": "..."}` |
 | GET | `/api/v1/models/train/status/{task_id}` | Poll task status |
 
-## Design rules
-
-- **Intent naming:** `^[a-z0-9_]+$`, enforced by Pydantic. Invalid names → 400.
-- **Domain abstraction:** clients never see Rasa's `utter_` prefix. Response
-  variations you add to intent `greet` are grouped under `utter_greet` at
-  build time.
-- **Auto-generated rules:** for every intent *that has at least one response*,
-  a rule `intent → utter_intent` is generated. v1.0 has no manual
-  stories/rules editing.
-- **Single training payload:** the DB is compiled into ONE merged YAML
-  document (domain + nlu + rules) and posted to Rasa's `/model/train` — no
-  shared-file editing, no file locking.
-- **Latest-only models:** trained `.tar.gz` files are ephemeral build
-  artifacts. No model history; to "roll back," fix the data and retrain.
-- **One training at a time:** a second train request while one is
-  pending/processing returns 503. Tasks stranded by a server restart are
-  automatically marked failed at startup.
-
 ## Configuration
 
 Copy `.env.example` to `.env`:
@@ -122,8 +108,25 @@ Copy `.env.example` to `.env`:
 | `DATABASE_URL` | `sqlite:///./rasa_gate.db` | SQLite for dev, PostgreSQL for prod |
 | `RASA_URL` | `http://localhost:5005` | Rasa server base URL |
 | `RASA_MODEL_PATH` | `./models` | Where trained models are written (shared with Rasa) |
+| `RASA_RECIPE` | `default.v1` | Rasa training recipe, sent with every training payload |
+| `RASA_ASSISTANT_ID` | `rasa-gate-bot` | Required by Rasa 3.x; set uniquely per deployment |
+| `RASA_LANGUAGE` | `en` | NLU pipeline language |
+| `RASA_STARTUP_WAIT` | `true` | Wait for Rasa + preload latest model at startup (set `false` if running the Gate without Rasa) |
+| `RASA_STARTUP_MAX_RETRIES` | `15` | Startup readiness check attempts before giving up (non-fatal) |
+| `RASA_STARTUP_RETRY_DELAY` | `2.0` | Seconds between readiness checks |
 | `AUTH_TOKEN` | *(empty)* | If set, all `/api/*` routes require header `X-API-Key: <token>` |
 | `LOG_LEVEL` | `INFO` | Structured JSON logs via structlog |
+
+### Why auth matters
+
+With `AUTH_TOKEN` unset, **anyone who can reach the server can read, edit,
+or delete every intent, trigger training on demand, and send chat messages
+as any user** — there's no login screen in front of this API. That's fine
+for local development on your own machine. The moment the Gate is reachable
+by anyone else (a shared dev box, staging, production), set `AUTH_TOKEN` and
+have your client apps send it as `X-API-Key`. It's a single shared secret
+(not per-user accounts) because Rasa Gate is a backend-to-backend gateway —
+end users never see the key directly.
 
 ## Error responses
 
@@ -146,25 +149,6 @@ All errors share one envelope:
 | 409 | Intent name already exists |
 | 500 | Rasa unreachable or internal failure |
 | 503 | Training already in progress |
-
-## Architecture
-
-```text
-  +---------+         +-----------------+         +--------------+
-  | Client  | ------> |   Rasa Gate     | ------> | Rasa Server  |
-  |         | <------ |   (FastAPI)     | <------ |  (3.6.x)     |
-  +---------+         +--------+--------+         +------+-------+
-                               |                         |
-                        DB read/write            shared ./models
-                               v                  volume (tar.gz)
-                      +------------------+              |
-                      |   Rasa Gate DB   |              |
-                      | (SQLite/Postgres)|<-------------+
-                      +------------------+   hot-swap via PUT /model
-```
-
-Stack: FastAPI · Pydantic v2 · SQLAlchemy 2.0 · httpx · structlog.
-Observability: JSON logs to stdout, `X-Request-ID` correlation on every request.
 
 ## Roadmap
 

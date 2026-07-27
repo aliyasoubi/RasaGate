@@ -7,6 +7,8 @@ services:
       RASA_URL: http://rasa:5005
       RASA_MODEL_PATH: /app/models
       DATABASE_URL: sqlite:////app/data-store/rasa_gate.db
+      # Both services boot together — wait for Rasa's readiness endpoint.
+      RASA_STARTUP_WAIT: "true"
     env_file:
       - path: .env
         required: false

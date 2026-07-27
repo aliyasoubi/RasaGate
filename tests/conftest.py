@@ -11,8 +11,20 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import settings
 from app.db.session import Base, get_db
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def _no_rasa_startup_wait(monkeypatch):
+    """
+    The app's lifespan waits for Rasa to be reachable on startup. Tests
+    don't run a real Rasa server, so disable that wait everywhere — without
+    this, every test that spins up TestClient(app) would hang for up to
+    RASA_STARTUP_MAX_RETRIES * RASA_STARTUP_RETRY_DELAY seconds.
+    """
+    monkeypatch.setattr(settings, "rasa_startup_wait", False)
 
 
 @pytest.fixture()

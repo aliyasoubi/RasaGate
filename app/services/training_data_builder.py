@@ -7,6 +7,7 @@ import yaml
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.models.nlu import Intent
 
 RASA_VERSION = "3.1"
@@ -140,6 +141,13 @@ def build_combined_training_data(db: Session) -> str:
     ]
 
     return _dump({
+        # Without recipe/assistant_id, Rasa 3.x rejects the training
+        # request outright. Pipeline/policies are omitted on purpose —
+        # that tells Rasa to use its built-in defaults (equivalent to a
+        # config.yml with those sections commented out).
+        "recipe": settings.rasa_recipe,
+        "assistant_id": settings.rasa_assistant_id,
+        "language": settings.rasa_language,
         "version": RASA_VERSION,
         "intents": intent_names,
         "responses": responses_block,

@@ -36,6 +36,19 @@ def test_combined_payload_is_single_yaml_document(db_session):
     assert any(item["intent"] == "greet" for item in doc["nlu"])
 
 
+def test_payload_includes_required_rasa_config(db_session):
+    """
+    Regression: Rasa 3.x rejects a training payload missing `recipe` /
+    `assistant_id`. These used to be silently absent.
+    """
+    _seed(db_session)
+    doc = yaml.safe_load(build_combined_training_data(db_session))
+
+    assert doc["recipe"] == "default.v1"
+    assert doc["assistant_id"]
+    assert doc["language"]
+
+
 def test_no_rule_for_intent_without_response(db_session):
     _seed(db_session)
     doc = yaml.safe_load(build_combined_training_data(db_session))

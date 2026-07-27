@@ -10,11 +10,11 @@ from app.core.exceptions import RasaUnreachableError
 
 logger = logging.getLogger(__name__)
 
-_READY_RETRY_DELAY_SECONDS = 2.0
 
-
-async def wait_for_rasa(client: httpx.AsyncClient, max_retries: int = 30) -> None:
+async def wait_for_rasa(client: httpx.AsyncClient, max_retries: int | None = None) -> None:
     """Block until the Rasa server reports ready."""
+    max_retries = max_retries if max_retries is not None else settings.rasa_startup_max_retries
+    delay = settings.rasa_startup_retry_delay
     url = f"{settings.rasa_url}/status"
 
     for attempt in range(1, max_retries + 1):
@@ -28,7 +28,7 @@ async def wait_for_rasa(client: httpx.AsyncClient, max_retries: int = 30) -> Non
 
         if attempt < max_retries:
             logger.info("Waiting for Rasa... (%d/%d)", attempt, max_retries)
-            await asyncio.sleep(_READY_RETRY_DELAY_SECONDS)
+            await asyncio.sleep(delay)
 
     raise RasaUnreachableError(
         f"Rasa server did not become ready after {max_retries} attempts"

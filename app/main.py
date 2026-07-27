@@ -11,6 +11,7 @@ from app.core.exceptions import register_exception_handlers
 from app.core.logging import RequestIdMiddleware, configure_logging
 from app.db.session import Base, engine
 from app.services.rasa_client import RasaClient
+from app.services.rasa_lifecycle import initialize_rasa_agent
 
 
 def _recover_stale_tasks() -> None:
@@ -47,6 +48,22 @@ async def lifespan(app: FastAPI):
     _recover_stale_tasks()
     async with httpx.AsyncClient(timeout=30.0) as client:
         app.state.rasa = RasaClient(client)
+
+        # Best-effort: wait for Rasa and preload the last trained model so a
+        # restart doesn't leave Rasa idle until the next training run. Not
+        # fatal — the Gate's own CRUD API works fine even if Rasa isn't up
+        # yet (e.g. local dev without docker-compose). Disable entirely via
+        # RASA_STARTUP_WAIT=false (tests do this to avoid hanging).
+        if settings.rasa_startup_wait:
+            try:
+                await initialize_rasa_agent(client)
+            except Exception as exc:  # RasaUnreachableError or similar
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "Rasa not ready at startup, continuing without it: %s", exc
+                )
+
         yield
 
 
